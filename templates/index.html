@@ -1,0 +1,288 @@
+<!DOCTYPE html>
+<html lang="ru">
+<head>
+    <meta charset="UTF-8">
+    <meta name="viewport" content="width=device-width, initial-scale=1.0">
+    <title>Поиск туров - TourVisor</title>
+    <link href="https://cdn.jsdelivr.net/npm/bootstrap@5.1.3/dist/css/bootstrap.min.css" rel="stylesheet">
+    <link href="https://cdnjs.cloudflare.com/ajax/libs/font-awesome/6.0.0/css/all.min.css" rel="stylesheet">
+    <style>
+        .tour-card {
+            margin-bottom: 20px;
+            transition: transform 0.2s;
+            border: none;
+            box-shadow: 0 2px 15px rgba(0, 0, 0, 0.1);
+        }
+        .tour-card:hover {
+            transform: translateY(-5px);
+            box-shadow: 0 5px 20px rgba(0, 0, 0, 0.15);
+        }
+        .loading {
+            display: none;
+            text-align: center;
+            padding: 20px;
+        }
+        .progress-bar {
+            height: 20px;
+        }
+        .chat-container {
+            height: 500px;
+            border: none;
+            border-radius: 10px;
+            margin-bottom: 20px;
+            box-shadow: 0 2px 15px rgba(0, 0, 0, 0.1);
+            background: white;
+        }
+        .chat-messages {
+            height: 400px;
+            overflow-y: auto;
+            padding: 15px;
+            background: #f8f9fa;
+            border-top-left-radius: 10px;
+            border-top-right-radius: 10px;
+        }
+        .chat-input {
+            padding: 15px;
+            background: white;
+            border-bottom-left-radius: 10px;
+            border-bottom-right-radius: 10px;
+        }
+        .message {
+            margin-bottom: 10px;
+            padding: 12px 15px;
+            border-radius: 15px;
+            max-width: 80%;
+            word-wrap: break-word;
+        }
+        .user-message {
+            background: #007bff;
+            color: white;
+            margin-left: auto;
+            border-bottom-right-radius: 5px;
+        }
+        .bot-message {
+            background: #e9ecef;
+            margin-right: auto;
+            border-bottom-left-radius: 5px;
+        }
+        .search-results {
+            margin-top: 20px;
+            padding: 20px;
+            background: white;
+            border-radius: 10px;
+            box-shadow: 0 2px 15px rgba(0, 0, 0, 0.1);
+        }
+        .hotel-image {
+            height: 200px;
+            object-fit: cover;
+            border-top-left-radius: 10px;
+            border-top-right-radius: 10px;
+        }
+        .hotel-rating {
+            position: absolute;
+            top: 10px;
+            right: 10px;
+            background: rgba(0, 0, 0, 0.7);
+            color: white;
+            padding: 5px 10px;
+            border-radius: 15px;
+        }
+        .hotel-stars {
+            color: #ffc107;
+        }
+        .hotel-price {
+            font-size: 1.2em;
+            font-weight: bold;
+            color: #28a745;
+        }
+        .hotel-features {
+            margin: 10px 0;
+            font-size: 0.9em;
+            color: #6c757d;
+        }
+        .btn-tour {
+            width: 100%;
+            margin-top: 10px;
+            border-radius: 20px;
+        }
+        .hotel-location {
+            color: #6c757d;
+            font-size: 0.9em;
+            margin-bottom: 10px;
+        }
+        .hotel-name {
+            font-size: 1.2em;
+            font-weight: bold;
+            margin-bottom: 5px;
+            color: #343a40;
+        }
+    </style>
+</head>
+<body class="bg-light">
+    <div class="container py-5">
+        <h1 class="text-center mb-5">Поиск туров</h1>
+        
+        <div class="row">
+            <div class="col-md-6">
+                <div class="chat-container">
+                    <div class="chat-messages" id="chatMessages">
+                        <!-- Messages will be added here -->
+                    </div>
+                    <div class="chat-input">
+                        <div class="input-group">
+                            <input type="text" id="messageInput" class="form-control" placeholder="Введите сообщение...">
+                            <button class="btn btn-primary" onclick="sendMessage()">
+                                <i class="fas fa-paper-plane"></i> Отправить
+                            </button>
+                        </div>
+                    </div>
+                </div>
+                <button class="btn btn-secondary w-100" onclick="resetChat()">
+                    <i class="fas fa-redo"></i> Начать заново
+                </button>
+            </div>
+            
+            <div class="col-md-6">
+                <div id="searchResults" class="search-results">
+                    <!-- Search results will be displayed here -->
+                </div>
+            </div>
+        </div>
+    </div>
+
+    <script>
+        let isWaitingForResponse = false;
+
+        async function sendMessage() {
+            if (isWaitingForResponse) return;
+
+            const input = document.getElementById('messageInput');
+            const message = input.value.trim();
+            if (!message) return;
+
+            input.value = '';
+            addMessage(message, 'user');
+            isWaitingForResponse = true;
+
+            try {
+                const formData = new FormData();
+                formData.append('message', message);
+
+                const response = await fetch('/chat', {
+                    method: 'POST',
+                    body: formData
+                });
+                
+                const data = await response.json();
+                
+                if (data.type === 'search_results') {
+                    addMessage(data.message, 'bot');
+                    displaySearchResults(data.data);
+                } else if (data.type === 'error') {
+                    addMessage('❌ ' + data.message, 'bot');
+                } else {
+                    addMessage(data.message, 'bot');
+                }
+            } catch (error) {
+                console.error('Error:', error);
+                addMessage('Произошла ошибка при отправке сообщения', 'bot');
+            } finally {
+                isWaitingForResponse = false;
+            }
+        }
+
+        function addMessage(message, type) {
+            const messagesContainer = document.getElementById('chatMessages');
+            const messageDiv = document.createElement('div');
+            messageDiv.className = `message ${type}-message`;
+            messageDiv.textContent = message;
+            messagesContainer.appendChild(messageDiv);
+            messagesContainer.scrollTop = messagesContainer.scrollHeight;
+        }
+
+        function displaySearchResults(results) {
+            const container = document.getElementById('searchResults');
+            
+            if (!results.result || !results.result.hotels) {
+                container.innerHTML = `
+                    <div class="text-center">
+                        <i class="fas fa-search fa-3x mb-3 text-muted"></i>
+                        <p>Туры не найдены</p>
+                    </div>`;
+                return;
+            }
+
+            let html = '<div class="row">';
+            results.result.hotels.forEach(hotel => {
+                const hotelName = hotel.hotelname || 'Название отеля не указано';
+                const stars = hotel.stars ? '★'.repeat(parseInt(hotel.stars)) : '';
+                const countryName = hotel.countryname || 'Страна не указана';
+                const regionName = hotel.regionname || 'Регион не указан';
+                const rating = hotel.rating || 'Нет оценки';
+                const price = hotel.price ? Number(hotel.price).toLocaleString('ru-RU') : 'По запросу';
+                const image = hotel.picturelink || 'https://placehold.co/600x400?text=Нет+фото';
+
+                html += `
+                    <div class="col-12 mb-4">
+                        <div class="card tour-card">
+                            <img src="${image}" class="hotel-image" alt="${hotelName}">
+                            <div class="hotel-rating">
+                                <i class="fas fa-star"></i> ${rating}
+                            </div>
+                            <div class="card-body">
+                                <h5 class="hotel-name">
+                                    ${hotelName}
+                                    <span class="hotel-stars text-warning">${stars}</span>
+                                </h5>
+                                <div class="hotel-location">
+                                    <i class="fas fa-map-marker-alt"></i> ${countryName}, ${regionName}
+                                </div>
+                                <div class="hotel-features">
+                                    <i class="fas fa-wifi"></i> Wi-Fi
+                                    <i class="fas fa-swimming-pool ml-2"></i> Бассейн
+                                    <i class="fas fa-utensils ml-2"></i> Ресторан
+                                </div>
+                                <div class="hotel-price text-success">
+                                    <i class="fas fa-tag"></i> От ${price} ₽
+                                </div>
+                                <button class="btn btn-primary btn-tour" onclick="showTours('${hotel.hotelcode}')">
+                                    <i class="fas fa-search"></i> Показать туры
+                                </button>
+                            </div>
+                        </div>
+                    </div>
+                `;
+            });
+            html += '</div>';
+            container.innerHTML = html;
+        }
+
+        async function resetChat() {
+            try {
+                const response = await fetch('/chat/reset', { method: 'POST' });
+                const data = await response.json();
+                
+                document.getElementById('chatMessages').innerHTML = '';
+                document.getElementById('searchResults').innerHTML = '';
+                addMessage(data.message, 'bot');
+            } catch (error) {
+                console.error('Error resetting chat:', error);
+            }
+        }
+
+        function showTours(hotelCode) {
+            // Implement showing tours for specific hotel
+            console.log('Showing tours for hotel:', hotelCode);
+        }
+
+        document.getElementById('messageInput').addEventListener('keypress', function(e) {
+            if (e.key === 'Enter') {
+                e.preventDefault();
+                sendMessage();
+            }
+        });
+
+        window.onload = resetChat;
+    </script>
+</body>
+</html> 
