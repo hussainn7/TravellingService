@@ -2,7 +2,8 @@ const fs = require('fs');
 const qrcode = require('qrcode-terminal');
 const { Client, LocalAuth } = require('whatsapp-web.js');
 const axios = require('axios'); // Import axios for making HTTP requests
-const xml2js = require('xml2js'); // Add this at the top with other requires
+const xml2js = require('xml2js'); // Import xml2js for XML parsing
+require('dotenv').config(); // Load environment variables
 
 class WhatsAppBot {
     constructor() {
@@ -25,6 +26,11 @@ class WhatsAppBot {
         this.userData = new Map(); // Store user data
         this.countries = this.loadCountries(); // Load country list
         this.setupEventHandlers();
+
+        // Hardcoded API credentials
+        this.OPENAI_API_KEY = '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';
+        this.TOURVISOR_LOGIN = 'admotionapp@gmail.com'; // Replace with your actual login
+        this.TOURVISOR_PASS = 'jqVZ4QLNLBN5'; // Replace with your actual password
     }
 
     loadCountries() {
@@ -119,185 +125,118 @@ class WhatsAppBot {
 
         // Message handling
         this.client.on('message', async (msg) => {
-            console.log(`Received message: ${msg.body} from ${msg.from}`); // Log received message
             if (msg.fromMe) return; // Ignore messages from the bot itself
-
-            const userId = msg.from;
-            if (!this.userData.has(userId)) {
-                this.userData.set(userId, {}); // Initialize user data
-                console.log(`New user detected: ${userId}`); // Log new user
-                await msg.reply('Привет! Если вы хотите начать поиск тура, напишите "тур".');
-            } else {
-                await this.handleUserInput(msg);
-            }
+            await this.handleMessage(msg);
         });
     }
 
-    async handleUserInput(msg) {
+    async handleMessage(msg) {
         const userId = msg.from;
+        console.log(`📩 Received message from user ${userId}: '${msg.body}'`);
+
+        // Initialize user data if it doesn't exist
+        if (!this.userData.has(userId)) {
+            this.userData.set(userId, {
+                isSearching: false,
+                awaitingDeparture: false,
+                awaitingCountry: false,
+                awaitingNights: false,
+                awaitingAdults: false,
+                awaitingChildren: false,
+                departure: null,
+                country: null,
+                nights: null,
+                adults: null,
+                children: null
+            });
+            // Send welcome message for new users
+            await msg.reply('👋 Здравствуйте! Я ваш турагент-помощник. Я могу помочь вам найти подходящий тур или ответить на ваши вопросы о путешествиях.\n\nЧтобы начать поиск тура, просто напишите "тур".');
+            return;
+        }
+
         const userParams = this.userData.get(userId);
 
-        console.log(`Handling user input for ${userId}: ${msg.body}`);
-        console.log('Current user params:', userParams); // Add this to debug
+        // Check if user is in tour search mode
+        if (msg.body.toLowerCase() === 'тур') {
+            userParams.isSearching = true;
+            userParams.awaitingDeparture = true;
+            await this.askDeparture(msg);
+            return;
+        }
 
+        // If user is in search mode, handle tour search flow
+        if (userParams.isSearching) {
+            await this.handleTourSearch(msg, userParams);
+        } else {
+            // Use AI for general conversation
+            const response = await this.getChatGPTResponse(msg.body);
+            await msg.reply(response);
+        }
+    }
+
+    async handleTourSearch(msg, userParams) {
         try {
-            if (msg.body.toLowerCase() === 'тур') {
-                userParams.awaitingDeparture = true;
-                await this.askDeparture(msg);
-            } else if (userParams.awaitingDeparture) {
-                await this.collectParameters(msg);
+            if (userParams.awaitingDeparture) {
+                userParams.departure = msg.body; // Store the city name
+                userParams.awaitingDeparture = false;
+                userParams.awaitingCountry = true;
+                await this.askCountry(msg);
+            } else if (userParams.awaitingCountry) {
+                const cityName = msg.body.trim();
+                const countryId = await this.getCountryIdFromCity(cityName);
+                if (countryId) {
+                    userParams.country = countryId; // Store the country ID
+                    userParams.awaitingCountry = false;
+                    userParams.awaitingNights = true;
+                    await this.askNights(msg);
+                } else {
+                    await msg.reply('😔 Не удалось распознать страну по городу. Пожалуйста, попробуйте снова или введите страну.');
+                }
             } else if (userParams.awaitingNights) {
-                // Use default values if something goes wrong
-                userParams.nights = { min: 7, max: 10 }; // Default medium stay
-                userParams.awaitingNights = false;
-                console.log('Using default nights range (7-10)');
-                await this.askAdults(msg);
+                const nights = msg.body.split('-').map(Number);
+                if (nights.length === 2) {
+                    userParams.nights = nights; // Store as an array [nightsFrom, nightsTo]
+                    userParams.awaitingNights = false;
+                    userParams.awaitingAdults = true;
+                    await this.askAdults(msg);
+                } else {
+                    await msg.reply('Пожалуйста, введите количество ночей в формате "X-Y", например "7-14".');
+                }
             } else if (userParams.awaitingAdults) {
-                userParams.adults = '2'; // Default 2 adults
+                userParams.adults = msg.body;
                 userParams.awaitingAdults = false;
+                userParams.awaitingChildren = true;
                 await this.askChildren(msg);
             } else if (userParams.awaitingChildren) {
-                userParams.children = '0'; // Default 0 children
+                userParams.children = msg.body;
                 userParams.awaitingChildren = false;
-                await this.startTourSearch(msg);
-            } else {
-                await msg.reply('Если вы хотите начать поиск тура, напишите "тур".');
+                await this.confirmSearch(msg, userParams);
             }
         } catch (error) {
-            console.error('Error in handleUserInput:', error);
-            // Use defaults and continue
-            if (userParams.awaitingNights) {
-                userParams.nights = { min: 7, max: 10 };
-                userParams.awaitingNights = false;
-                await this.askAdults(msg);
-            } else if (userParams.awaitingAdults) {
-                userParams.adults = '2';
-                userParams.awaitingAdults = false;
-                await this.askChildren(msg);
-            } else if (userParams.awaitingChildren) {
-                userParams.children = '0';
-                userParams.awaitingChildren = false;
-                await this.startTourSearch(msg);
-            }
+            console.error('Error in handleTourSearch:', error);
+            await msg.reply('Произошла ошибка. Пожалуйста, напишите "тур" для начала поиска заново.');
+            this.resetUserState(msg.from);
         }
     }
 
-    async askDeparture(msg) {
-        console.log('Asking for departure city code.'); // Log asking for departure
-        await msg.reply('Введите код города вылета:');
-    }
+    async confirmSearch(msg, userParams) {
+        console.log(`Starting search with the following parameters:`);
+        console.log(`Departure: ${userParams.departure}`); // This is the city name
+        console.log(`Country ID: ${userParams.country}`); // This should be the country ID
+        console.log(`Nights: ${userParams.nights.join('-')}`);
+        console.log(`Adults: ${userParams.adults}`);
+        console.log(`Children: ${userParams.children}`);
 
-    async collectParameters(msg) {
-        const userId = msg.from;
-        const userParams = this.userData.get(userId);
+        await msg.reply('Хорошо, начинаем поиск...');
 
-        console.log(`Collecting parameters for user ${userId}: ${msg.body}`);
-
-        if (!userParams.departure) {
-            userParams.departure = msg.body;
-            userParams.awaitingDeparture = false; // Clear the flag
-            await this.askCountry(msg); // Ask for destination country
-        } else if (userParams.awaitingCountry) {
-            const input = msg.body.toLowerCase();
-            const matchingCountries = this.countries.filter(c => c.name.toLowerCase().startsWith(input));
-
-            if (matchingCountries.length > 0) {
-                userParams.country = matchingCountries[0].id; // Use the first match
-                userParams.awaitingCountry = false; // Clear the flag
-                console.log(`Country code saved: ${userParams.country}`);
-                await this.askNights(msg); // Ask for nights
-            } else {
-                // Check if the input matches a known city and map to country ID
-                const cityToCountryMap = {
-                    "дубай": "9", // UAE
-                    // Add more city mappings here
-                };
-
-                const countryId = cityToCountryMap[input];
-                if (countryId) {
-                    userParams.country = countryId; // Use the mapped country ID
-                    userParams.awaitingCountry = false; // Clear the flag
-                    console.log(`Country code saved from city: ${userParams.country}`);
-                    await this.askNights(msg); // Ask for nights
-                } else {
-                    await msg.reply('Страна не найдена. Пожалуйста, введите первые буквы названия страны или название города.');
-                }
-            }
-        } else if (userParams.awaitingNights) {
-            const nightsOption = msg.body;
-            let nightsRange;
-
-            switch (nightsOption) {
-                case '1':
-                    nightsRange = { min: 5, max: 7 }; // Short stay
-                    break;
-                case '2':
-                    nightsRange = { min: 7, max: 10 }; // Medium stay
-                    break;
-                case '3':
-                    nightsRange = { min: 10, max: 14 }; // Long stay
-                    break;
-                case '4':
-                    nightsRange = { min: 14, max: 21 }; // Very long stay
-                    break;
-                default:
-                    // If input is invalid, set default nights range
-                    nightsRange = { min: 7, max: 10 }; // Default to Medium stay
-                    await msg.reply('Вы ввели неверный вариант. Используем стандартный диапазон (7-10 ночей).');
-                    break;
-            }
-
-            userParams.nights = nightsRange; // Store the nights range
-            userParams.awaitingNights = false; // Clear the flag
-            console.log(`Nights range saved: ${userParams.nights}`);
-            await this.askAdults(msg); // Ask for adults
-        } else if (userParams.awaitingAdults) {
-            userParams.adults = msg.body; // Store adults
-            userParams.awaitingAdults = false; // Clear the flag
-            console.log(`Adults saved: ${userParams.adults}`);
-            await this.askChildren(msg); // Ask for children
-        } else if (userParams.awaitingChildren) {
-            userParams.children = msg.body; // Store children
-            userParams.awaitingChildren = false; // Clear the flag
-            console.log(`Children saved: ${userParams.children}`);
-            await this.startTourSearch(msg); // Proceed to search
+        // Proceed to start the tour search
+        const requestId = await this.startTourSearch(msg, userParams);
+        if (requestId) {
+            await this.getSearchResults(requestId, msg); // Directly get results
         }
     }
 
-    async askCountry(msg) {
-        console.log('Asking for destination country.');
-        await msg.reply('В какую страну вы хотите поехать? Введите первые буквы названия страны (например: "Тур" для Турции).');
-        this.userData.get(msg.from).awaitingCountry = true; // Set flag
-    }
-
-    async askNights(msg) {
-        console.log('Asking for number of nights.'); // Log asking for nights
-        await msg.reply('Выберите количество ночей:\n' +
-                        '1: Короткая (5-7 ночей)\n' +
-                        '2: Средняя (7-10 ночей)\n' +
-                        '3: Длинная (10-14 ночей)\n' +
-                        '4: Очень длинная (14-21 ночь)');
-        this.userData.get(msg.from).awaitingNights = true; // Set flag
-    }
-
-    async askAdults(msg) {
-        console.log('Asking for number of adults.'); // Log asking for adults
-        await msg.reply('Сколько взрослых будет в поездке?');
-        this.userData.get(msg.from).awaitingAdults = true; // Set flag
-    }
-
-    async askChildren(msg) {
-        console.log('Asking for number of children.'); // Log asking for children
-        await msg.reply('Сколько детей будет в поездке?');
-        this.userData.get(msg.from).awaitingChildren = true; // Set flag
-    }
-
-    async startTourSearch(msg) {
-        const userId = msg.from;
-        const userParams = this.userData.get(userId);
-        
-        console.log('Starting tour search with params:', userParams);
-
+    async formatSearchRequest(userParams) {
         const today = new Date();
         const dateFrom = new Date(today);
         dateFrom.setDate(today.getDate() + 1);
@@ -307,117 +246,209 @@ class WhatsAppBot {
         const formattedDateFrom = `${dateFrom.getDate().toString().padStart(2, '0')}.${(dateFrom.getMonth() + 1).toString().padStart(2, '0')}.${dateFrom.getFullYear()}`;
         const formattedDateTo = `${dateTo.getDate().toString().padStart(2, '0')}.${(dateTo.getMonth() + 1).toString().padStart(2, '0')}.${dateTo.getFullYear()}`;
 
-        let nightsFrom, nightsTo;
-
-        // Determine nights range based on user selection
-        if (typeof userParams.nights === 'object') {
-            nightsFrom = userParams.nights.min;
-            nightsTo = userParams.nights.max;
-        } else {
-            nightsFrom = userParams.nights; // If it's a single number
-            nightsTo = userParams.nights; // Same for single number
-        }
-
-        const apiUrl = `http://tourvisor.ru/xml/search.php?authlogin=admotionapp@gmail.com&authpass=jqVZ4QLNLBN5&departure=${userParams.departure}&country=${userParams.country}&datefrom=${formattedDateFrom}&dateto=${formattedDateTo}&nightsfrom=${nightsFrom}&nightsto=${nightsTo}&adults=${userParams.adults}&child=${userParams.children}&format=xml`;
-
-        try {
-            await msg.reply('Начинаем поиск туров...');
-            const response = await axios.get(apiUrl);
-            
-            // Parse XML response
-            const parser = new xml2js.Parser({ explicitArray: false });
-            const result = await parser.parseStringPromise(response.data);
-            
-            if (result && result.result && result.result.requestid) {
-                const requestId = result.result.requestid;
-                console.log(`Request ID: ${requestId}`);
-                // await msg.reply(`Поиск начат. ID запроса: ${requestId}`);
-                await this.checkSearchStatus(requestId, msg);
-            } else {
-                console.error('Unexpected response structure:', result);
-                await msg.reply('Произошла ошибка при получении ID запроса.');
-            }
-        } catch (error) {
-            console.error('Error sending request to Tourvisor API:', error);
-            await msg.reply('Произошла ошибка при отправке запроса на поиск туров.');
-        }
+        return `http://tourvisor.ru/xml/search.php?authlogin=${this.TOURVISOR_LOGIN}&authpass=${this.TOURVISOR_PASS}&departure=${userParams.country}&country=${userParams.country}&datefrom=${formattedDateFrom}&dateto=${formattedDateTo}&nightsfrom=${userParams.nights[0]}&nightsto=${userParams.nights[1]}&adults=${userParams.adults}&child=${userParams.children}&format=xml`;
     }
 
-    async checkSearchStatus(requestId, msg) {
-        const statusUrl = `http://tourvisor.ru/xml/result.php?authlogin=admotionapp@gmail.com&authpass=jqVZ4QLNLBN5&requestid=${requestId}&type=status`;
+    async startTourSearch(msg, userParams) {
+        const apiUrl = await this.formatSearchRequest(userParams);
+        console.log(`Making API request to: ${apiUrl}`);
 
         try {
-            const response = await axios.get(statusUrl);
-            const parser = new xml2js.Parser({ explicitArray: false });
-            const result = await parser.parseStringPromise(response.data);
-
-            if (result.data && result.data.status) {
-                const status = result.data.status;
-                console.log('Search Status:', status);
-
-                if (status.state === 'finished') {
-                    await msg.reply(`Поиск завершен!\nНайдено отелей: ${status.hotelsfound}\nНайдено туров: ${status.toursfound}\nМинимальная цена: ${status.minprice} руб.`);
-                    await this.getSearchResults(requestId, msg);
-                } else {
-                    await msg.reply(`Поиск продолжается...`);
-                    // Check again in 5 seconds if not finished
-                    setTimeout(() => this.checkSearchStatus(requestId, msg), 5000);
-                }
-            }
-                            } catch (error) {
-            console.error('Error checking search status:', error);
-            await msg.reply('Произошла ошибка при проверке статуса поиска.');
+            const response = await axios.get(apiUrl);
+            console.log(`API Response: ${response.data}`);
+            const result = await this.parseApiResponse(response.data);
+            return result.requestid; // Return the request ID for direct result fetching
+        } catch (error) {
+            console.error('Error making API request:', error);
+            await msg.reply('Произошла ошибка при отправке запроса на поиск туров.');
+            return null;
         }
     }
 
     async getSearchResults(requestId, msg) {
-        const resultsUrl = `http://tourvisor.ru/xml/result.php?authlogin=admotionapp@gmail.com&authpass=jqVZ4QLNLBN5&requestid=${requestId}&type=result`;
+        const resultsUrl = `http://tourvisor.ru/xml/result.php?authlogin=${this.TOURVISOR_LOGIN}&authpass=${this.TOURVISOR_PASS}&requestid=${requestId}&type=result`;
+        console.log(`Fetching results from: ${resultsUrl}`); // Print the result link
+
+        // Set a timeout for the request
+        const timeout = new Promise((_, reject) => setTimeout(() => reject(new Error('Timeout')), 15000));
 
         try {
-            const response = await axios.get(resultsUrl);
-            const parser = new xml2js.Parser({ explicitArray: false });
-            const result = await parser.parseStringPromise(response.data);
-
-            if (result.data && result.data.result && result.data.result.hotel) {
-                const hotels = Array.isArray(result.data.result.hotel) 
-                    ? result.data.result.hotel 
-                    : [result.data.result.hotel];
-
-                // Send first 5 hotels info
-                for (let i = 0; i < Math.min(5, hotels.length); i++) {
-                    const hotel = hotels[i];
-                    const tours = Array.isArray(hotel.tours.tour) 
-                        ? hotel.tours.tour 
-                        : [hotel.tours.tour];
-                    
-                    let message = `🏨 *${hotel.hotelname}* ${hotel.hotelstars}⭐\n`;
-                    message += `📍 ${hotel.countryname}, ${hotel.regionname}\n`;
-                    message += `💰 Цена от: ${hotel.price} руб.\n`;
-                    message += `⭐ Рейтинг: ${hotel.hotelrating}\n`;
-                    message += `📝 ${hotel.hoteldescription}\n\n`;
-                    message += `🎫 Доступные туры:\n`;
-
-                    // Add first 3 tours for this hotel
-                    for (let j = 0; j < Math.min(3, tours.length); j++) {
-                        const tour = tours[j];
-                        message += `\n🔸 Вылет: ${tour.flydate}\n`;
-                        message += `  ⌛ Ночей: ${tour.nights}\n`;
-                        message += `  💶 Цена: ${tour.price} руб.\n`;
-                        message += `  🍽 Питание: ${tour.mealrussian}\n`;
-                    }
-
-                    message += `\n🔗 Подробнее: http://manyhotels.ru/${hotel.fulldesclink}`;
-                    await msg.reply(message);
-                }
-
-                await msg.reply('Это были первые 5 отелей из списка. Чтобы начать новый поиск, напишите "тур"');
-            } else {
-                await msg.reply('К сожалению, не удалось найти подходящие туры.');
-            }
+            const response = await Promise.race([
+                axios.get(resultsUrl),
+                timeout
+            ]);
+            console.log(`Results Response: ${response.data}`);
+            await this.handleResults(response.data, msg);
         } catch (error) {
-            console.error('Error getting search results:', error);
-            await msg.reply('Произошла ошибка при получении результатов поиска.');
+            console.error('Error fetching results:', error);
+            await msg.reply('Произошла ошибка при получении результатов поиска. Пожалуйста, попробуйте позже.');
         }
+    }
+
+    async handleResults(xmlData, msg) {
+        const parser = new xml2js.Parser();
+        parser.parseString(xmlData, (err, result) => {
+            if (err) {
+                console.error('Error parsing results:', err);
+                msg.reply('Не удалось обработать результаты поиска.');
+                return;
+            }
+
+            // Check if the result contains hotels
+            const hotels = result.data.result[0].hotel;
+            if (hotels && hotels.length > 0) {
+                let responseMessage = '🏨 Найденные отели:\n';
+                hotels.forEach(hotel => {
+                    const hotelName = hotel.hotelname[0];
+                    const price = hotel.price[0];
+                    const description = hotel.hoteldescription[0];
+                    const fullDescLink = hotel.fulldesclink[0];
+
+                    // Extracting fly dates from tours
+                    const tours = hotel.tours[0].tour;
+                    const flyDates = tours.map(tour => tour.flydate[0]).join(', ');
+
+                    responseMessage += `\n🏨 Название: ${hotelName}\n💰 Цена: ${price} руб.\n✈️ Даты вылета: ${flyDates}\n📝 Описание: ${description}\n🔗 Полное описание: ${fullDescLink}\n`;
+                });
+                msg.reply(responseMessage);
+            } else {
+                msg.reply('😔 К сожалению, отели не найдены по вашему запросу.');
+            }
+        });
+    }
+
+    async parseApiResponse(xmlData) {
+        const parser = new xml2js.Parser();
+        return new Promise((resolve, reject) => {
+            parser.parseString(xmlData, (err, result) => {
+                if (err) {
+                    reject(err);
+                } else {
+                    resolve(result.result);
+                }
+            });
+        });
+    }
+
+    async getCountryIdFromCity(cityName) {
+        // Predefined mapping of cities to country IDs
+        const cityCountryMap = {
+            "Москва": 4,
+            "Санкт-Петербург": 4,
+            "Хургада": 1,
+            "Анталия": 4,
+            "Турция": 4,
+            // Add more cities and their corresponding country IDs as needed
+        };
+
+        // Check if the city is in the predefined list
+        if (cityCountryMap[cityName]) {
+            return cityCountryMap[cityName];
+        } else {
+            // If not found, use ChatGPT to find the country
+            const countryId = await this.getCountryIdFromChatGPT(cityName);
+            return countryId;
+        }
+    }
+
+    async getCountryIdFromChatGPT(cityName) {
+        const apiKey = this.OPENAI_API_KEY; // Use the hardcoded OpenAI API key
+        const endpoint = 'https://api.openai.com/v1/chat/completions';
+
+        try {
+            const response = await axios.post(endpoint, {
+                model: 'gpt-3.5-turbo',
+                messages: [
+                    { 
+                        role: 'system', 
+                        content: 'You are a helpful assistant. Given a city name, provide the corresponding country ID from the predefined list.'
+                    },
+                    { 
+                        role: 'user', 
+                        content: `What is the country ID for the city: ${cityName}?`
+                    }
+                ],
+            }, {
+                headers: {
+                    'Authorization': `Bearer ${apiKey}`,
+                    'Content-Type': 'application/json',
+                },
+            });
+
+            // Extract the country ID from the response
+            const countryId = response.data.choices[0].message.content; // Adjust based on the expected response format
+            return countryId;
+        } catch (error) {
+            console.error('Error connecting to ChatGPT:', error);
+            return null; // Return null if there is an error
+        }
+    }
+
+    async getChatGPTResponse(userMessage) {
+        const apiKey = this.OPENAI_API_KEY; // Use the hardcoded OpenAI API key
+        const endpoint = 'https://api.openai.com/v1/chat/completions';
+
+        try {
+            const response = await axios.post(endpoint, {
+                model: 'gpt-3.5-turbo',
+                messages: [
+                    { 
+                        role: 'system', 
+                        content: 'You are a helpful travel agent assistant. Provide friendly and informative responses about travel-related questions. If someone asks about booking a tour, remind them they can type "тур" to start the booking process.'
+                    },
+                    { 
+                        role: 'user', 
+                        content: userMessage 
+                    }
+                ],
+            }, {
+                headers: {
+                    'Authorization': `Bearer ${apiKey}`,
+                    'Content-Type': 'application/json',
+                },
+            });
+
+            return response.data.choices[0].message.content;
+        } catch (error) {
+            console.error('Error connecting to ChatGPT:', error);
+            return "🚨 Извините, произошла ошибка при обращении к ChatGPT. Проверьте ваш API ключ и попробуйте позже.";
+        }
+    }
+
+    async askDeparture(msg) {
+        await msg.reply('🏙️ Из какого города вы хотите вылететь?');
+    }
+
+    async askCountry(msg) {
+        await msg.reply('🌍 В какую страну вы хотите поехать?');
+    }
+
+    async askNights(msg) {
+        await msg.reply('⌛ На сколько ночей планируете поездку?');
+    }
+
+    async askAdults(msg) {
+        await msg.reply('👥 Сколько взрослых поедет? (введите число от 1 до 6)');
+    }
+
+    async askChildren(msg) {
+        await msg.reply('👶 Сколько детей поедет? (введите число от 0 до 4)');
+    }
+
+    resetUserState(userId) {
+        this.userData.set(userId, {
+            isSearching: false,
+            awaitingDeparture: false,
+            awaitingCountry: false,
+            awaitingNights: false,
+            awaitingAdults: false,
+            awaitingChildren: false,
+            departure: null,
+            country: null,
+            nights: null,
+            adults: null,
+            children: null
+        });
     }
 
     start() {
