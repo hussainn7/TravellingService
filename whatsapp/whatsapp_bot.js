@@ -28,7 +28,7 @@ class WhatsAppBot {
         this.setupEventHandlers();
 
         // Hardcoded API credentials
-        this.OPENAI_API_KEY = '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';
+        this.OPENAI_API_KEY = 'OPNEAI_KEY'; 
         this.TOURVISOR_LOGIN = 'admotionapp@gmail.com'; // Replace with your actual login
         this.TOURVISOR_PASS = 'jqVZ4QLNLBN5'; // Replace with your actual password
     }
@@ -134,7 +134,6 @@ class WhatsAppBot {
         const userId = msg.from;
         console.log(`📩 Received message from user ${userId}: '${msg.body}'`);
 
-        // Initialize user data if it doesn't exist
         if (!this.userData.has(userId)) {
             this.userData.set(userId, {
                 isSearching: false,
@@ -149,28 +148,24 @@ class WhatsAppBot {
                 adults: null,
                 children: null
             });
-            // Send welcome message for new users
-            await msg.reply('👋 Здравствуйте! Я ваш турагент-помощник. Я могу помочь вам найти подходящий тур или ответить на ваши вопросы о путешествиях.\n\nЧтобы начать поиск тура, просто напишите "тур".');
+            await this.safeSendMessage(msg, '👋 Здравствуйте! Я ваш турагент-помощник. Я могу помочь вам найти подходящий тур или ответить на ваши вопросы о путешествиях.\n\nЧтобы начать поиск тура, просто напишите "тур".');
             return;
         }
 
         const userParams = this.userData.get(userId);
 
-        // Check if user is in tour search mode
         if (msg.body.toLowerCase() === 'тур') {
             userParams.isSearching = true;
             userParams.awaitingDeparture = true;
-            await this.askDeparture(msg);
+            await this.safeSendMessage(msg, '🏙️ Из какого города вы хотите вылететь?');
             return;
         }
 
-        // If user is in search mode, handle tour search flow
         if (userParams.isSearching) {
             await this.handleTourSearch(msg, userParams);
         } else {
-            // Use AI for general conversation
             const response = await this.getChatGPTResponse(msg.body);
-            await msg.reply(response);
+            await this.safeSendMessage(msg, response);
         }
     }
 
@@ -190,7 +185,7 @@ class WhatsAppBot {
                     userParams.awaitingNights = true;
                     await this.askNights(msg);
                 } else {
-                    await msg.reply('😔 Не удалось распознать страну по городу. Пожалуйста, попробуйте снова или введите страну.');
+                    await this.safeSendMessage(msg, '😔 Не удалось распознать страну по городу. Пожалуйста, попробуйте снова или введите страну.');
                 }
             } else if (userParams.awaitingNights) {
                 const nights = msg.body.split('-').map(Number);
@@ -200,7 +195,7 @@ class WhatsAppBot {
                     userParams.awaitingAdults = true;
                     await this.askAdults(msg);
                 } else {
-                    await msg.reply('Пожалуйста, введите количество ночей в формате "X-Y", например "7-14".');
+                    await this.safeSendMessage(msg, 'Пожалуйста, введите количество ночей в формате "X-Y", например "7-14".');
                 }
             } else if (userParams.awaitingAdults) {
                 userParams.adults = msg.body;
@@ -214,7 +209,7 @@ class WhatsAppBot {
             }
         } catch (error) {
             console.error('Error in handleTourSearch:', error);
-            await msg.reply('Произошла ошибка. Пожалуйста, напишите "тур" для начала поиска заново.');
+            await this.safeSendMessage(msg, 'Произошла ошибка. Пожалуйста, напишите "тур" для начала поиска заново.');
             this.resetUserState(msg.from);
         }
     }
@@ -227,7 +222,7 @@ class WhatsAppBot {
         console.log(`Adults: ${userParams.adults}`);
         console.log(`Children: ${userParams.children}`);
 
-        await msg.reply('Хорошо, начинаем поиск...');
+        await this.safeSendMessage(msg, 'Хорошо, начинаем поиск...');
 
         // Proceed to start the tour search
         const requestId = await this.startTourSearch(msg, userParams);
@@ -260,37 +255,49 @@ class WhatsAppBot {
             return result.requestid; // Return the request ID for direct result fetching
         } catch (error) {
             console.error('Error making API request:', error);
-            await msg.reply('Произошла ошибка при отправке запроса на поиск туров.');
+            await this.safeSendMessage(msg, 'Произошла ошибка при отправке запроса на поиск туров.');
             return null;
         }
     }
 
     async getSearchResults(requestId, msg) {
         const resultsUrl = `http://tourvisor.ru/xml/result.php?authlogin=${this.TOURVISOR_LOGIN}&authpass=${this.TOURVISOR_PASS}&requestid=${requestId}&type=result`;
-        console.log(`Fetching results from: ${resultsUrl}`); // Print the result link
-
-        // Set a timeout for the request
-        const timeout = new Promise((_, reject) => setTimeout(() => reject(new Error('Timeout')), 15000));
+        console.log(`Fetching results from: ${resultsUrl}`);
 
         try {
-            const response = await Promise.race([
-                axios.get(resultsUrl),
-                timeout
-            ]);
-            console.log(`Results Response: ${response.data}`);
-            await this.handleResults(response.data, msg);
+            // Wait a few seconds for the search to complete
+            await this.safeSendMessage(msg, '🔍 Ищем туры, это может занять несколько секунд...');
+            await new Promise(resolve => setTimeout(resolve, 5000));
+
+            const response = await axios.get(resultsUrl);
+            const parser = new xml2js.Parser();
+            
+            const result = await new Promise((resolve, reject) => {
+                parser.parseString(response.data, (err, result) => {
+                    if (err) reject(err);
+                    else resolve(result);
+                });
+            });
+
+            // Check if we have data and hotels
+            if (result.data && result.data.result && result.data.result[0].hotel) {
+                await this.handleResults(response.data, msg);
+            } else {
+                await this.safeSendMessage(msg, '🔄 Поиск все еще выполняется. Пожалуйста, повторите поиск через несколько минут, написав "тур"');
+            }
         } catch (error) {
             console.error('Error fetching results:', error);
-            await msg.reply('Произошла ошибка при получении результатов поиска. Пожалуйста, попробуйте позже.');
+            await this.safeSendMessage(msg, '😔 Произошла ошибка при получении результатов поиска. Пожалуйста, попробуйте позже.');
         }
     }
 
     async handleResults(xmlData, msg) {
         const parser = new xml2js.Parser();
-        parser.parseString(xmlData, (err, result) => {
+        parser.parseString(xmlData, async (err, result) => {
             if (err) {
                 console.error('Error parsing results:', err);
-                msg.reply('Не удалось обработать результаты поиска.');
+                await this.safeSendMessage(msg, 'Не удалось обработать результаты поиска.');
+                this.resetUserState(msg.from);
                 return;
             }
 
@@ -303,17 +310,22 @@ class WhatsAppBot {
                     const price = hotel.price[0];
                     const description = hotel.hoteldescription[0];
                     const fullDescLink = hotel.fulldesclink[0];
+                    const countryname = hotel.countryname[0];
 
                     // Extracting fly dates from tours
                     const tours = hotel.tours[0].tour;
-                    const flyDates = tours.map(tour => tour.flydate[0]).join(', ');
+                    const flydate = tours.map(tour => tour.flydate[0]).join(', ');
 
-                    responseMessage += `\n🏨 Название: ${hotelName}\n💰 Цена: ${price} руб.\n✈️ Даты вылета: ${flyDates}\n📝 Описание: ${description}\n🔗 Полное описание: ${fullDescLink}\n`;
+                    responseMessage += `\n🏨 Название: ${hotelName}\n💰 Цена: ${price} тг.\n Страна ${countryname}\n📝 Описание: ${description}\n🔗 Полное описание: http://manyhotels.ru/${fullDescLink}\n`;
                 });
-                msg.reply(responseMessage);
+                await this.safeSendMessage(msg, responseMessage);
+                await this.safeSendMessage(msg, 'Поиск завершен. Вы можете задать мне вопрос о путешествиях или написать "тур" для нового поиска.');
             } else {
-                msg.reply('😔 К сожалению, отели не найдены по вашему запросу.');
+                await this.safeSendMessage(msg, '😔 К сожалению, отели не найдены по вашему запросу. Вы можете написать "тур" для нового поиска или задать мне вопрос о путешествиях.');
             }
+            
+            // Reset user state after showing results
+            this.resetUserState(msg.from);
         });
     }
 
@@ -333,20 +345,85 @@ class WhatsAppBot {
     async getCountryIdFromCity(cityName) {
         // Predefined mapping of cities to country IDs
         const cityCountryMap = {
-            "Москва": 4,
-            "Санкт-Петербург": 4,
-            "Хургада": 1,
+            // Kazakhstan cities
+            "Алматы": 78,
+            "Астана": 78,
+            "Шымкент": 78,
+            "Караганда": 78,
+            "Костанай": 78,
+            "Кызылорда": 78,
+            "Актау": 78,
+            "Атырау": 78,
+            "Павлодар": 78,
+            "Усть-Каменогорск": 78,
+            "Семей": 78,
+            "Тараз": 78,
+            "Уральск": 78,
+            "Актобе": 78,
+
+            // Turkey cities
             "Анталия": 4,
+            "Стамбул": 4,
+            "Бодрум": 4,
+            "Мармарис": 4,
+            "Алания": 4,
+            "Кемер": 4,
+            "Фетхие": 4,
             "Турция": 4,
-            // Add more cities and their corresponding country IDs as needed
+
+            // UAE cities
+            "Дубай": 9,
+            "Абу-Даби": 9,
+            "Шарджа": 9,
+            "Рас-эль-Хайма": 9,
+            "Аджман": 9,
+            "ОАЭ": 9,
+            "Эмираты": 9,
+
+            // Egypt cities
+            "Хургада": 1,
+            "Шарм-эль-Шейх": 1,
+            "Каир": 1,
+            "Египет": 1,
+
+            // Thailand cities
+            "Бангкок": 2,
+            "Пхукет": 2,
+            "Паттайя": 2,
+            "Самуи": 2,
+            "Таиланд": 2,
+
+            // Russia cities
+            "Москва": 47,
+            "Санкт-Петербург": 47,
+            "Сочи": 47,
+            "Россия": 47,
+
+            // Common country names
+            "Мальдивы": 8,
+            "Греция": 6,
+            "Кипр": 15,
+            "Индия": 3,
+            "Вьетнам": 16,
+            "Шри-Ланка": 12,
+            "Индонезия": 7,
+            "Бали": 7,
+            "Сейшелы": 28,
+            "Маврикий": 27,
+            "Доминикана": 11,
+            "Куба": 10,
+            "Израиль": 30
         };
 
+        // Convert input to title case and trim
+        const normalizedCityName = cityName.trim();
+
         // Check if the city is in the predefined list
-        if (cityCountryMap[cityName]) {
-            return cityCountryMap[cityName];
+        if (cityCountryMap[normalizedCityName]) {
+            return cityCountryMap[normalizedCityName];
         } else {
             // If not found, use ChatGPT to find the country
-            const countryId = await this.getCountryIdFromChatGPT(cityName);
+            const countryId = await this.getCountryIdFromChatGPT(normalizedCityName);
             return countryId;
         }
     }
@@ -449,6 +526,21 @@ class WhatsAppBot {
             adults: null,
             children: null
         });
+    }
+
+    async safeSendMessage(msg, response) {
+        try {
+            // Use direct message sending instead of reply
+            await this.client.sendMessage(msg.from, response);
+        } catch (error) {
+            console.error('Error sending message:', error);
+            // Try alternative method if first fails
+            try {
+                await msg.reply(response);
+            } catch (secondError) {
+                console.error('Both sending methods failed:', secondError);
+            }
+        }
     }
 
     start() {
